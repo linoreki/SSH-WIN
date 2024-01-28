@@ -1,0 +1,103 @@
+import socket
+import threading
+import sys
+import os
+
+# Intentar importar los módulos necesarios
+try:
+    import paramiko
+except ImportError:
+    print("Instalando paramiko...")
+    os.system("pip install paramiko")
+    import paramiko
+
+try:
+    import win32security
+except ImportError:
+    print("Instalando pywin32...")
+    os.system("pip install pywin32")
+    import win32security
+
+# Nombre del archivo donde se guardará la clave RSA
+HOST_KEY_FILENAME = "tu_clave_privada_rsa.pem"
+
+
+def print_server_info():
+    # Obtener la dirección IP del servidor SSH
+    hostname = socket.gethostname()
+    ip_address = socket.gethostbyname(hostname)
+    print(f"Server IP: {ip_address}")
+    print(f"Server Hostname: {hostname}")
+    print(f"Server Username: {os.getlogin()}")
+
+class SSHServer(paramiko.ServerInterface):
+    def __init__(self):
+        self.event = threading.Event()
+
+    def check_auth_password(self, username, password):
+        try:
+            # Verificar la contraseña proporcionada con la contraseña almacenada en el sistema (Windows)
+            user_info = win32security.LogonUser(
+                username,
+                None,
+                password,
+                win32security.LOGON32_LOGON_INTERACTIVE,
+                win32security.LOGON32_PROVIDER_DEFAULT
+            )
+            return paramiko.AUTH_SUCCESSFUL
+        except Exception as e:
+            print(f"Error autenticando al usuario: {str(e)}")
+            return paramiko.AUTH_FAILED
+
+    def check_channel_request(self, kind, chanid):
+        if kind == "session":
+            return paramiko.OPEN_SUCCEEDED
+        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+
+def handle_connection(client, addr):
+    print(f"Conexión aceptada desde {addr[0]}:{addr[1]}")
+
+    transport = paramiko.Transport(client)
+
+    # Generar una nueva clave RSA si no existe
+    if not os.path.exists(HOST_KEY_FILENAME):
+        rsa_key = paramiko.RSAKey.generate(2048)
+        rsa_key.write_private_key_file(HOST_KEY_FILENAME)
+
+    # Cargar la clave RSA del archivo
+    transport.add_server_key(paramiko.RSAKey(filename=HOST_KEY_FILENAME))
+
+    server = SSHServer()
+
+    try:
+        transport.start_server(server=server)
+    except paramiko.SSHException as e:
+        print(f"Error al iniciar el servidor SSH: {str(e)}")
+        return
+
+    server.event.wait()
+    client.close()
+
+if __name__ == "__main__":
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    print_server_info()
+    
+    try:
+        server_socket.bind(("0.0.0.0", 22))
+    except Exception as e:
+        print(f"Error al enlazar al puerto 22: {str(e)}")
+        sys.exit(1)
+
+    server_socket.listen(100)
+    print("Escuchando conexiones...")
+
+    while True:
+        try:
+            client, addr = server_socket.accept()
+            client_handler = threading.Thread(target=handle_connection, args=(client, addr))
+            client_handler.daemon = True
+            client_handler.start()
+        except Exception as e:
+            print(f"Error al aceptar la conexión: {str(e)}")
